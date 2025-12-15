@@ -1,0 +1,120 @@
+name: Render invoice PDF
+
+on:
+  workflow_dispatch:
+    inputs:
+      airtable_base_id:
+        description: "Airtable Base ID (app...)"
+        required: true
+      airtable_table_name:
+        description: "Airtable table name, e.g. Invoices"
+        required: true
+      airtable_record_id:
+        description: "Airtable record id (rec...)"
+        required: true
+      invoice_number:
+        description: "Invoice number for filename"
+        required: true
+      html_url:
+        description: "Public raw HTML URL"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          npm init -y
+          npm i puppeteer
+
+      - name: Render PDF
+        env:
+          HTML_URL: ${{ inputs.html_url }}
+          INVOICE_NUMBER: ${{ inputs.invoice_number }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const puppeteer = require("puppeteer");
+
+          const htmlUrl = process.env.HTML_URL;
+          const inv = (process.env.INVOICE_NUMBER || "DRAFT").replace(/[^a-zA-Z0-9_]/g, "_");
+          const outDir = "pdf";
+          const outPath = `${outDir}/invoice_${inv}.pdf`;
+
+          if (!htmlUrl) throw new Error("Missing HTML_URL");
+
+          fs.mkdirSync(outDir, { recursive: true });
+
+          (async () => {
+            const browser = await puppeteer.launch({
+              args: ["--no-sandbox", "--disable-setuid-sandbox"]
+            });
+            const page = await browser.newPage();
+
+            await page.goto(htmlUrl, { waitUntil: "networkidle0", timeout: 120000 });
+
+            await page.pdf({
+              path: outPath,
+              format: "A4",
+              printBackground: true,
+              margin: { top: "8mm", right: "0mm", bottom: "8mm", left: "0mm" }
+            });
+
+            await browser.close();
+            console.log("PDF written:", outPath);
+          })().catch(err => {
+            console.error(err);
+            process.exit(1);
+          });
+          NODE
+
+      - name: Commit PDF to repo
+        env:
+          INVOICE_NUMBER: ${{ inputs.invoice_number }}
+        run: |
+          inv=$(echo "${INVOICE_NUMBER:-DRAFT}" | sed 's/[^a-zA-Z0-9_]/_/g')
+          git config user.name "invoice-bot"
+          git config user.email "invoice-bot@users.noreply.github.com"
+          git add "pdf/invoice_${inv}.pdf"
+          git commit -m "Add PDF invoice_${inv}.pdf" || echo "Nothing to commit"
+          git push
+
+      - name: Update Airtable attachment
+        env:
+          AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
+          AIRTABLE_BASE_ID: ${{ inputs.airtable_base_id }}
+          AIRTABLE_TABLE_NAME: ${{ inputs.airtable_table_name }}
+          AIRTABLE_RECORD_ID: ${{ inputs.airtable_record_id }}
+          INVOICE_NUMBER: ${{ inputs.invoice_number }}
+          GITHUB_REPO: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          inv=$(echo "${INVOICE_NUMBER:-DRAFT}" | sed 's/[^a-zA-Z0-9_]/_/g')
+          pdf_url="https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_REF_NAME}/pdf/invoice_${inv}.pdf"
+
+          curl -sS -X PATCH \
+            "https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['AIRTABLE_TABLE_NAME']))")/${AIRTABLE_RECORD_ID}" \
+            -H "Authorization: Bearer ${AIRTABLE_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-binary @- <<JSON
+          {
+            "fields": {
+              "Invoice PDF": [
+                { "url": "${pdf_url}" }
+              ]
+            }
+          }
+          JSON
