@@ -1,0 +1,65 @@
+name: Render invoice PDF
+
+on:
+  workflow_dispatch:
+    inputs:
+      record_id:
+        description: Airtable record id (rec...)
+        required: true
+        type: string
+      html_url:
+        description: Public HTML URL to render
+        required: true
+        type: string
+      pdf_name:
+        description: File name without extension
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          npm init -y
+          npm i playwright@latest
+          npx playwright install --with-deps chromium
+
+      - name: Render PDF
+        env:
+          HTML_URL: ${{ inputs.html_url }}
+          PDF_NAME: ${{ inputs.pdf_name }}
+        run: node .github/scripts/render_pdf.js
+
+      - name: Commit PDF to docs
+        env:
+          PDF_NAME: ${{ inputs.pdf_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/pdfs/${PDF_NAME}.pdf
+          git commit -m "Add PDF ${PDF_NAME}" || echo "Nothing to commit"
+          git push
+
+      - name: Update Airtable attachment
+        env:
+          AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
+          AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
+          AIRTABLE_TABLE_NAME: ${{ secrets.AIRTABLE_TABLE_NAME }}
+          AIRTABLE_PDF_FIELD_NAME: ${{ secrets.AIRTABLE_PDF_FIELD_NAME }}
+          AIRTABLE_STATUS_FIELD_NAME: ${{ secrets.AIRTABLE_STATUS_FIELD_NAME }}
+          RECORD_ID: ${{ inputs.record_id }}
+          PDF_NAME: ${{ inputs.pdf_name }}
+        run: node .github/scripts/update_airtable.js
